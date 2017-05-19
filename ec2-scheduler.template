@@ -1,0 +1,253 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "(SO0002) - EC2 Scheduler: This template installs an opt-in version of the EC2 Scheduler for automatically starting and stopping EC2 instances.",
+    "Parameters": {
+        "Schedule": {
+            "Description": "Schedule for CWE Scheduled Expression",
+            "Type": "String",
+            "Default": "5minutes",
+            "AllowedValues": [
+                "1minute",
+                "5minutes",
+                "15minutes",
+                "30minutes",
+                "1hour"
+            ]
+        },
+        "DefaultStartTime": {
+            "Description": "Default Start Time (UTC, 24-hour format)",
+            "Type": "String",
+            "Default": "0800"
+        },
+        "DefaultStopTime": {
+            "Description": "Default Start Time (UTC, 24-hour format)",
+            "Type": "String",
+            "Default": "1800"
+        },
+        "DefaultDaysActive": {
+            "Description": "Enter 'all', 'weekdays', or any combination of days ('mon', 'tue', 'wed', 'thu', 'fri', 'sat', or 'sun') comma separated",
+            "Type": "String",
+            "Default": "all"
+        },
+        "CustomTagName": {
+            "Description": "Custom Tag Name",
+            "Type": "String",
+            "Default": "scheduler:ec2-startstop"
+        },
+        "CloudWatchMetrics": {
+            "Description": "Create CloudWatch Custom Metric",
+            "Type": "String",
+            "Default": "Enabled",
+            "AllowedValues": [
+                "Enabled",
+                "Disabled"
+            ]
+        }
+    },
+    "Mappings": {
+        "Schedule": {
+            "Time": {
+                "1minute": "cron(0/1 * * * ? *)",
+                "5minutes": "cron(0/5 * * * ? *)",
+                "15minutes": "cron(0/15 * * * ? *)",
+                "30minutes": "cron(0/30 * * * ? *)",
+                "1hour": "cron(0 * * * ? *)"
+            }
+        }
+    },
+    "Metadata": {
+        "AWS::CloudFormation::Interface": {
+            "ParameterGroups": [
+                {
+                    "Label": {
+                        "default": "Tag Configuration"
+                    },
+                    "Parameters": [
+                        "CustomTagName"
+                    ]
+                },
+                {
+                    "Label": {
+                        "default": "CloudWatch Event Schedule Configuration"
+                    },
+                    "Parameters": [
+                        "Schedule"
+                    ]
+                },
+                {
+                    "Label": {
+                        "default": "Default Value Configuration"
+                    },
+                    "Parameters": [
+                        "DefaultStartTime",
+                        "DefaultStopTime",
+                        "DefaultDaysActive"
+                    ]
+                },
+                {
+                    "Label": {
+                        "default": "CloudWatch Custom Metric"
+                    },
+                    "Parameters": [
+                        "CloudWatchMetrics"
+                    ]
+                }
+            ]
+        }
+    },
+    "Resources": {
+        "ec2SchedulerRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": "lambda.amazonaws.com"
+                            },
+                            "Action": "sts:AssumeRole"
+                        }
+                    ]
+                },
+                "Path": "/",
+                "Policies": [
+                    {
+                        "PolicyName": "ec2SchedulerPermissions",
+                        "PolicyDocument": {
+                            "Version": "2012-10-17",
+                            "Statement": [
+                                {
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "logs:CreateLogGroup",
+                                        "logs:CreateLogStream",
+                                        "logs:PutLogEvents"
+                                    ],
+                                    "Resource": "arn:aws:logs:*:*:log-group:/aws/lambda/*"
+                                },
+                                {
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "ec2:StartInstances",
+                                        "ec2:StopInstances",
+                                        "ec2:DescribeRegions",
+                                        "ec2:DescribeInstances",
+                                        "cloudwatch:PutMetricData",
+                                        "cloudformation:DescribeStacks"
+                                    ],
+                                    "Resource": "*"
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "ec2SchedulerOptIn": {
+            "Type": "AWS::Lambda::Function",
+            "Properties": {
+                "Handler": "ec2-scheduler.lambda_handler",
+                "Role": {
+                    "Fn::GetAtt": [
+                        "ec2SchedulerRole",
+                        "Arn"
+                    ]
+                },
+                "Description": "EC2 Scheduler Lambda function for automatically starting and stopping EC2 instances.",
+                "Code": {
+                    "S3Bucket": {
+                        "Fn::Join": [
+                            "",
+                            [
+                                "solutions-",
+                                {
+                                    "Ref": "AWS::Region"
+                                }
+                            ]
+                        ]
+                    },
+                    "S3Key": "ec2-scheduler/v2/ec2-scheduler.zip"
+                },
+                "Runtime": "python2.7",
+                "Timeout": "300"
+            }
+        },
+        "ScheduledRule": {
+            "Type": "AWS::Events::Rule",
+            "Properties": {
+                "Description": "Rule to trigger EC2Scheduler function on a schedule",
+                "ScheduleExpression": {
+                    "Fn::FindInMap": [
+                        "Schedule",
+                        "Time",
+                        {
+                            "Ref": "Schedule"
+                        }
+                    ]
+                },
+                "State": "ENABLED",
+                "Targets": [
+                    {
+                        "Arn": {
+                            "Fn::GetAtt": [
+                                "ec2SchedulerOptIn",
+                                "Arn"
+                            ]
+                        },
+                        "Id": "TargetFunctionV1"
+                    }
+                ]
+            }
+        },
+        "PermissionForEventsToInvokeLambda": {
+            "Type": "AWS::Lambda::Permission",
+            "Properties": {
+                "FunctionName": {
+                    "Ref": "ec2SchedulerOptIn"
+                },
+                "Action": "lambda:InvokeFunction",
+                "Principal": "events.amazonaws.com",
+                "SourceArn": {
+                    "Fn::GetAtt": [
+                        "ScheduledRule",
+                        "Arn"
+                    ]
+                }
+            }
+        }
+    },
+    "Outputs": {
+        "DefaultStartTime": {
+            "Description": "Default Start Time (UTC, 24-hour format)",
+            "Value": {
+                "Ref": "DefaultStartTime"
+            }
+        },
+        "DefaultStopTime": {
+            "Description": "Default Start Time (UTC, 24-hour format)",
+            "Value": {
+                "Ref": "DefaultStopTime"
+            }
+        },
+        "DefaultDaysActive": {
+            "Description": "Enter 'all', 'weekdays', or any combination of days ('mon', 'tue', 'wed', 'thu', 'fri', 'sat', or 'sun') comma separated",
+            "Value": {
+                "Ref": "DefaultDaysActive"
+            }
+        },
+        "CustomTagName": {
+            "Description": "Custom Tag Name",
+            "Value": {
+                "Ref": "CustomTagName"
+            }
+        },
+        "CloudWatchMetrics": {
+            "Description": "Create CloudWatch Custom Metric",
+            "Value": {
+                "Ref": "CloudWatchMetrics"
+            }
+        }
+    }
+}
